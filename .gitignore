@@ -1,0 +1,22 @@
+# Local environment settings and secrets
+.env
+/backend/venv/
+backend/venv/**
+!.env.example
+backend/.env.example
+
+# Python and frontend build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+
+# Local database backups and temporary artifacts
+*.bak
+campuslink-test-backup-*.db
+campuslink.db.test-backup-*
+staged-changes-*.patch
+working-changes-*.patch
+recruiter_audit.txt
+tatus

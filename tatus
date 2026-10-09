@@ -1,0 +1,33 @@
+[1mdiff --git a/backend/app/database.py b/backend/app/database.py[m
+[1mindex 7ec664a..fbcc084 100644[m
+[1m--- a/backend/app/database.py[m
+[1m+++ b/backend/app/database.py[m
+[36m@@ -44,6 +44,28 @@[m [mdef create_db_and_tables() -> None:[m
+ 		_repair_local_growth_snapshot_schema()[m
+ 		_repair_local_registration_deadline_schema()[m
+ 		_repair_local_job_application_deadline_schema()[m
+[32m+[m		[32m_repair_local_recruiter_portal_schema()[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef _repair_local_recruiter_portal_schema() -> None:[m
+[32m+[m	[32m"""Add recruiter portal fields to existing SQLite postings without replacing data."""[m
+[32m+[m	[32mtable = "recruiter_jds"[m
+[32m+[m	[32mwith engine.begin() as connection:[m
+[32m+[m		[32minspector = inspect(connection)[m
+[32m+[m		[32mif not inspector.has_table(table):[m
+[32m+[m			[32mreturn[m
+[32m+[m		[32mcolumns = {column["name"] for column in inspector.get_columns(table)}[m
+[32m+[m		[32mfor name, definition in {[m
+[32m+[m			[32m"job_category": "VARCHAR(20) NOT NULL DEFAULT 'job'",[m
+[32m+[m			[32m"description": "TEXT NOT NULL DEFAULT ''",[m
+[32m+[m			[32m"eligible_branches": "TEXT NOT NULL DEFAULT '[]'",[m
+[32m+[m		[32m}.items():[m
+[32m+[m			[32mif name not in columns:[m
+[32m+[m				[32mconnection.exec_driver_sql(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}')[m
+[32m+[m		[32mif "job_category" not in columns:[m
+[32m+[m			[32mconnection.exec_driver_sql([m
+[32m+[m				[32mf'UPDATE "{table}" SET "job_category" = \'internship\' WHERE lower("role_title") LIKE \'%intern%\''[m
+[32m+[m			[32m)[m
+ [m
+ [m
+ def _repair_local_job_application_deadline_schema() -> None:[m

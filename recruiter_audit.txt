@@ -1,0 +1,735 @@
+﻿
+==================== frontend\src\pages\recruiter\Dashboard.tsx ====================
+
+// Placeholder for Dashboard.tsx
+
+==================== frontend\src\pages\recruiter\CandidateList.tsx ====================
+
+// Placeholder for CandidateList.tsx
+
+==================== frontend\src\pages\recruiter\CandidateDetail.tsx ====================
+
+// Placeholder for CandidateDetail.tsx
+
+==================== frontend\src\pages\recruiter\CreateDrive.tsx ====================
+
+// Placeholder for CreateDrive.tsx
+
+==================== frontend\src\pages\recruiter\StageManager.tsx ====================
+
+import React, { useState } from 'react';
+import { QRScanner } from '../../components/scheduling/QRScanner';
+
+export const StageManager: React.FC = () => {
+    const [panels, setPanels] = useState([
+        { id: 1, status: 'busy', delay_minutes: 20, queue_size: 4 },
+        { id: 2, status: 'idle', delay_minutes: 0, queue_size: 0 }
+    ]);
+
+    return (
+        <div className="p-6 max-w-6xl mx-auto">
+            <h1 className="text-2xl font-bold mb-6">Drive Stage Manager</h1>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <h2 className="text-xl font-semibold mb-4">Attendance</h2>
+                    <QRScanner driveId={101} />
+                </div>
+                
+                <div>
+                    <h2 className="text-xl font-semibold mb-4">Live Panel Queue Monitor</h2>
+                    <div className="space-y-4">
+                        {panels.map(panel => (
+                            <div key={panel.id} className="p-4 border rounded-lg shadow-sm bg-white flex justify-between items-center">
+                                <div>
+                                    <h3 className="font-semibold">Panel {panel.id}</h3>
+                                    <p className="text-sm text-gray-500">Status: <span className={panel.status === 'idle' ? 'text-green-500' : 'text-amber-500'}>{panel.status}</span></p>
+                                </div>
+                                <div className="text-right">
+                                    <p className="text-sm font-medium text-red-600">
+                                        {panel.delay_minutes > 15 && `Delayed: ${panel.delay_minutes} mins`}
+                                    </p>
+                                    <p className="text-sm text-gray-600">Queue: {panel.queue_size} candidates</p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    {panels.some(p => p.delay_minutes > 15) && (
+                        <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded text-amber-800 text-sm">
+                            âš ï¸ Load balancer action required: Reallocating queue from delayed panels.
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default StageManager;
+
+==================== backend\app\api\v1\recruiters.py ====================
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from backend.app.database import get_db
+from backend.app.models import MatchRecord, RecruiterJD
+from backend.app.schemas.api import MessageResponse
+from backend.app.schemas.recruiter import RecruiterJD as RecruiterJDResponse
+from backend.app.schemas.recruiter import RecruiterJDCreate, RecruiterJDUpdate
+
+router = APIRouter(prefix="/recruiters", tags=["recruiters"])
+
+
+@router.get("", response_model=list[RecruiterJDResponse])
+def list_recruiter_jds(session: Session = Depends(get_db)) -> list[RecruiterJD]:
+	return list(session.scalars(select(RecruiterJD).order_by(RecruiterJD.id)))
+
+
+@router.get("/{jd_id}", response_model=RecruiterJDResponse)
+def get_recruiter_jd(jd_id: int, session: Session = Depends(get_db)) -> RecruiterJD:
+	jd = session.get(RecruiterJD, jd_id)
+	if jd is None:
+		raise HTTPException(status_code=404, detail="Recruiter job description not found")
+	return jd
+
+
+@router.post("", response_model=RecruiterJDResponse, status_code=201)
+def create_recruiter_jd(
+	payload: RecruiterJDCreate,
+	session: Session = Depends(get_db),
+) -> RecruiterJD:
+	jd = RecruiterJD(**payload.model_dump())
+	session.add(jd)
+	try:
+		session.commit()
+	except IntegrityError as error:
+		session.rollback()
+		raise HTTPException(status_code=409, detail="Unable to create recruiter job description") from error
+	session.refresh(jd)
+	return jd
+
+
+@router.put("/{jd_id}", response_model=RecruiterJDResponse)
+def update_recruiter_jd(
+	jd_id: int,
+	payload: RecruiterJDUpdate,
+	session: Session = Depends(get_db),
+) -> RecruiterJD:
+	jd = session.get(RecruiterJD, jd_id)
+	if jd is None:
+		raise HTTPException(status_code=404, detail="Recruiter job description not found")
+	for field_name, value in payload.model_dump(exclude_unset=True).items():
+		setattr(jd, field_name, value)
+	try:
+		session.commit()
+	except IntegrityError as error:
+		session.rollback()
+		raise HTTPException(status_code=409, detail="Unable to update recruiter job description") from error
+	session.refresh(jd)
+	return jd
+
+
+@router.delete("/{jd_id}", response_model=MessageResponse)
+def delete_recruiter_jd(
+	jd_id: int,
+	session: Session = Depends(get_db),
+) -> MessageResponse:
+	jd = session.get(RecruiterJD, jd_id)
+	if jd is None:
+		raise HTTPException(status_code=404, detail="Recruiter job description not found")
+	session.execute(delete(MatchRecord).where(MatchRecord.jd_id == jd_id))
+	session.delete(jd)
+	session.commit()
+	return MessageResponse(detail="Recruiter job description deleted")
+
+==================== backend\app\api\v1\jobs.py ====================
+
+import re
+import os
+from datetime import datetime, timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from backend.app.core.security import require_roles
+from backend.app.database import get_db
+from backend.app.models import PlacementDrive, RecruiterJD, Student, StudentApplication, User
+from backend.app.services.jobicy_service import fetch_jobicy_jobs
+from backend.app.services.job_aggregator import aggregate_opportunities
+
+router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+class JobPosting(BaseModel):
+	model_config = ConfigDict(extra="allow")
+	id: str
+	title: str
+	company: str
+	location: str = ""
+	stipend_salary: str | None = None
+	salary: dict | str | None = None
+	job_type: str
+	description: str = ""
+	application_url: str
+	url: str
+	tags: list[str] = Field(default_factory=list)
+	source: str
+
+
+class AggregateJobFeed(BaseModel):
+	jobs: list[JobPosting]
+	source_counts: dict[str, int]
+	source: str
+
+
+def _demo_jobs(now: datetime) -> list[dict]:
+	"""Rich development-only listings used when no recruiter JDs exist."""
+	rows = [
+		("TCS", "Graduate Engineer Trainee", "Python, Java, SQL, Algorithms", "Full-time", "https://www.tcs.com/careers", 3),
+		("Infosys", "Systems Engineer", "Java, Python, Data Structures, Algorithms", "Full-time", "https://www.infosys.com/careers/", 7),
+		("Wipro", "Project Engineer Intern", "React, JavaScript, SQL", "Internship", "https://careers.wipro.com/", 12),
+		("Accenture", "Associate Software Engineer", "Java, Cloud, SQL, Git", "Full-time", "https://www.accenture.com/careers", 4),
+		("Amazon", "SDE Intern", "Java, Python, Data Structures, AWS", "Internship", "https://www.amazon.jobs/", 5),
+		("Google", "Software Engineer Intern", "C++, Algorithms, Linux, System Design", "Internship", "https://careers.google.com/", 6),
+		("Microsoft", "Software Engineer", "C#, Azure, .NET, Data Structures", "Full-time", "https://jobs.careers.microsoft.com/", 8),
+		("Deloitte", "Analyst - Technology", "Python, SQL, Data Analytics, Cloud", "Full-time", "https://www.deloitte.com/careers", 2),
+		("Cognizant", "Programmer Analyst Trainee", "Java, SQL, React, Problem Solving", "Full-time", "https://careers.cognizant.com/", 3),
+		("Capgemini", "Software Engineer Intern", "Python, JavaScript, APIs, Git", "Internship", "https://www.capgemini.com/careers/", 5),
+		("HCLTech", "Graduate Engineer Trainee", "C++, SQL, Linux, Networking", "Full-time", "https://www.hcltech.com/careers", 9),
+		("IBM", "Associate Developer", "Python, Java, Cloud, Machine Learning", "Full-time", "https://www.ibm.com/careers", 6),
+	]
+	return [
+		{
+			"id": f"demo-job-{index + 1}", "recruiter_jd_id": None, "title": title,
+			"company": company,
+			"description": f"Development sample opportunity from {company}. Skills: {skills}. Apply through the employer careers page.",
+			"logo": None, "url": url, "tags": [part.strip() for part in skills.split(",")],
+			"job_type": [job_type], "location": "BPUT Placement Cell",
+			"drive_date": (now + timedelta(days=drive_days)).replace(microsecond=0).isoformat(),
+			"application_deadline": (now + timedelta(days=min(index % 6 + 1, 6), hours=12)).replace(microsecond=0).isoformat() if index < 8 else None,
+			"published_at": now.isoformat(),
+		}
+		for index, (company, title, skills, job_type, url, drive_days) in enumerate(rows)
+	]
+
+
+def get_active_job_feed(session: Session, request: Request) -> tuple[list[dict], str]:
+	"""Build listings only from recruiter JDs and active placement-drive records."""
+	jds = list(session.scalars(select(RecruiterJD).order_by(RecruiterJD.id)))
+	active_drives = list(session.scalars(
+		select(PlacementDrive)
+		.where(
+			PlacementDrive.status.in_(("Scheduled", "Conflicted")),
+			PlacementDrive.drive_date >= datetime.now(),
+		)
+		.order_by(PlacementDrive.drive_date, PlacementDrive.id)
+	))
+	drive_by_company: dict[str, PlacementDrive] = {}
+	for drive in active_drives:
+		drive_by_company.setdefault(drive.company_name.strip().casefold(), drive)
+	jobs = []
+	for jd in jds:
+		tags = [part.strip() for part in re.split(r"[,;|]", jd.required_skills or "") if part.strip()]
+		drive = drive_by_company.get(jd.company_name.strip().casefold())
+		jobs.append({
+			"id": f"recruiter-jd-{jd.id}",
+			"recruiter_jd_id": jd.id,
+			"title": jd.role_title,
+			"company": jd.company_name,
+			"description": f"Minimum CGPA: {jd.min_cgpa:g}. Required skills: {', '.join(tags)}. Package: {jd.package_lpa:g} LPA.",
+			"logo": None,
+			"url": str(request.url_for("get_recruiter_jd", jd_id=jd.id)),
+			"tags": tags,
+			"package_lpa": jd.package_lpa,
+			"job_type": ["Internship"] if re.search(r"intern", jd.role_title, re.IGNORECASE) else ["Full-time"],
+			"location": drive.venue if drive else "",
+			"drive_date": drive.drive_date.isoformat() if drive else None,
+			"application_deadline": jd.application_deadline.isoformat() if jd.application_deadline else None,
+			"published_at": getattr(jd, "created_at", None).isoformat() if getattr(jd, "created_at", None) else None,
+		})
+	if not jobs and os.getenv("APP_ENV", "development").casefold() != "production":
+		return _demo_jobs(datetime.now()), "CampusLink development sample data"
+	return jobs, "CampusLink recruiter database"
+
+
+@router.get("/internal-postings")
+def get_internal_postings(
+	category: str = Query(..., pattern="^(job|internship)$"),
+	session: Session = Depends(get_db),
+	_current_user: User = Depends(require_roles("student")),
+) -> dict:
+	"""Return active recruiter-created postings, separately from external feeds."""
+	now = datetime.now()
+	query = select(RecruiterJD).where(
+		(RecruiterJD.application_deadline.is_(None)) | (RecruiterJD.application_deadline >= now)
+	).order_by(RecruiterJD.id.desc())
+	rows = session.scalars(query)
+	postings = []
+	for jd in rows:
+		is_internship = bool(re.search(r"intern", jd.role_title, re.IGNORECASE))
+		if (category == "internship") != is_internship:
+			continue
+		skills = [part.strip() for part in re.split(r"[,;|]", jd.required_skills or "") if part.strip()]
+		postings.append({
+			"id": f"recruiter-jd-{jd.id}",
+			"recruiter_jd_id": jd.id,
+			"company_name": jd.company_name,
+			"role_title": jd.role_title,
+			"category": "internship" if is_internship else "job",
+			"ctc_lpa": None if is_internship else jd.package_lpa,
+			"stipend_lpa": jd.package_lpa if is_internship else None,
+			"package_lpa": jd.package_lpa,
+			"cgpa_cutoff": jd.min_cgpa,
+			"eligible_branches": [],
+			"branch_eligibility": "Not specified by recruiter",
+			"tech_stack": skills,
+			"description": f"Minimum CGPA: {jd.min_cgpa:g}. Required skills: {', '.join(skills) or 'Not specified'}. Package: {jd.package_lpa:g} LPA.",
+			"application_deadline": jd.application_deadline.isoformat() if jd.application_deadline else None,
+		})
+	return postings
+
+
+@router.post("/internal-postings/{posting_id}/apply")
+def apply_to_internal_posting(
+	posting_id: int,
+	session: Session = Depends(get_db),
+	current_user: User = Depends(require_roles("student")),
+) -> dict:
+	"""Record a student's application to a recruiter-created posting."""
+	student = session.scalar(select(Student).where(Student.email == current_user.email))
+	if student is None:
+		raise HTTPException(status_code=404, detail="Student profile not found; onboarding required")
+	jd = session.get(RecruiterJD, posting_id)
+	if jd is None or (jd.application_deadline and jd.application_deadline < datetime.now()):
+		raise HTTPException(status_code=404, detail="This recruiter posting is no longer available")
+	job_id = f"recruiter-jd-{jd.id}"
+	application = session.scalar(select(StudentApplication).where(
+		StudentApplication.student_id == student.id,
+		StudentApplication.external_job_id == job_id,
+	))
+	if application is None:
+		application = StudentApplication(
+			student_id=student.id,
+			external_job_id=job_id,
+			job_title=jd.role_title,
+			company_name=jd.company_name,
+			job_url=f"/student/jobs/{'recruiter-internships' if re.search(r'intern', jd.role_title, re.IGNORECASE) else 'recruiter-jobs'}?posting={jd.id}",
+		)
+		session.add(application)
+		try:
+			session.commit()
+		except IntegrityError:
+			session.rollback()
+			application = session.scalar(select(StudentApplication).where(
+				StudentApplication.student_id == student.id,
+				StudentApplication.external_job_id == job_id,
+			))
+			if application is None:
+				raise HTTPException(status_code=409, detail="Could not save your application")
+	else:
+		session.commit()
+	session.refresh(application)
+	return {"id": application.id, "job_id": job_id, "status": application.status, "created_at": application.created_at.isoformat()}
+
+
+@router.get("/live")
+async def get_live_jobs(
+	request: Request,
+	tag: str | None = Query(default=None, max_length=60),
+	industry: str | None = Query(default=None, max_length=100),
+	count: int = Query(default=20, ge=1, le=50),
+	session: Session = Depends(get_db),
+) -> dict:
+	"""Return live Jobicy listings alongside CampusLink recruiter postings."""
+	jobs, database_source = get_active_job_feed(session, request)
+	jobicy_jobs = await fetch_jobicy_jobs(tag=tag, industry=industry, count=count)
+	jobs = jobicy_jobs + jobs
+	source = "Jobicy + CampusLink recruiter database" if jobicy_jobs else database_source
+	if tag:
+		needle = tag.casefold()
+		jobs = [job for job in jobs if needle in " ".join([job["title"], job["company"], job["description"], *job["tags"]]).casefold()]
+	return {
+		"jobs": jobs,
+		"source": source,
+		"live_count": sum(str(job.get("id", "")).startswith("jobicy-") for job in jobs),
+		"database_count": sum(not str(job.get("id", "")).startswith("jobicy-") for job in jobs),
+	}
+
+
+@router.get("/aggregate", response_model=AggregateJobFeed)
+async def get_aggregated_jobs(
+	type_filter: str | None = Query(default=None, alias="type", pattern="^(job|internship)$"),
+	keyword: str | None = Query(default=None, max_length=100),
+	count: int = Query(default=30, ge=1, le=50),
+) -> AggregateJobFeed:
+	"""Return normalized Jobicy and configured Internshala opportunities."""
+	jobs, counts = await aggregate_opportunities(count=count, keyword=keyword)
+	if type_filter:
+		jobs = [job for job in jobs if job.get("job_type") == type_filter]
+	return AggregateJobFeed(
+		jobs=jobs,
+		source_counts=counts,
+		source=" + ".join(name for name, amount in (("Jobicy", counts["jobicy"]), ("Internshala/regional feed", counts["internshala"])) if amount) or "No external feeds available",
+	)
+
+
+class ApplicationCreate(BaseModel):
+	job_id: str = Field(min_length=1, max_length=100)
+	title: str = Field(min_length=1, max_length=255)
+	company: str = Field(min_length=1, max_length=255)
+	url: str = Field(min_length=8, max_length=1000)
+
+	@field_validator("url")
+	@classmethod
+	def validate_url(cls, value: str) -> str:
+		if not value.startswith(("https://", "http://")):
+			raise ValueError("Job URL must use HTTP or HTTPS")
+		return value
+
+
+class ApplicationResult(BaseModel):
+	id: int
+	job_id: str
+	status: str
+	created_at: str
+
+
+@router.get("/applications/me")
+def list_my_applications(
+	session: Session = Depends(get_db),
+	current_user: User = Depends(require_roles("student")),
+) -> list[str]:
+	student = session.scalar(select(Student).where(Student.email == current_user.email))
+	if student is None:
+		raise HTTPException(status_code=404, detail="Student profile not found; onboarding required")
+	return list(session.scalars(select(StudentApplication.external_job_id).where(StudentApplication.student_id == student.id)))
+
+
+@router.post("/apply", response_model=ApplicationResult)
+def apply_to_job(
+	payload: ApplicationCreate,
+	session: Session = Depends(get_db),
+	current_user: User = Depends(require_roles("student")),
+) -> ApplicationResult:
+	"""Record an authenticated student's application to an external listing."""
+	student = session.scalar(select(Student).where(Student.email == current_user.email))
+	if student is None:
+		raise HTTPException(status_code=404, detail="Student profile not found; onboarding required")
+	application = session.scalar(select(StudentApplication).where(
+		StudentApplication.student_id == student.id,
+		StudentApplication.external_job_id == payload.job_id,
+	))
+	if application is None:
+		application = StudentApplication(
+			student_id=student.id,
+			external_job_id=payload.job_id,
+			job_title=payload.title,
+			company_name=payload.company,
+			job_url=payload.url,
+		)
+		session.add(application)
+		try:
+			session.commit()
+		except IntegrityError:
+			session.rollback()
+			application = session.scalar(select(StudentApplication).where(
+				StudentApplication.student_id == student.id,
+				StudentApplication.external_job_id == payload.job_id,
+			))
+			if application is None:
+				raise HTTPException(status_code=409, detail="Could not save your application")
+	else:
+		session.commit()
+	session.refresh(application)
+	return ApplicationResult(
+		id=application.id,
+		job_id=application.external_job_id,
+		status=application.status,
+		created_at=application.created_at.isoformat(),
+	)
+
+==================== backend\app\api\v1\interviews.py ====================
+
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from backend.app.core.security import require_roles
+from backend.app.database import get_db
+from backend.app.models import Student, StudentApplication, User
+
+router = APIRouter(prefix="/interviews", tags=["interviews"])
+
+
+class InterviewEvent(BaseModel):
+	id: str
+	application_id: int
+	job_id: str
+	company: str
+	role_title: str
+	application_status: str
+	round_name: str
+	scheduled_at: datetime
+	status: str
+	platform: str
+	platform_url: str | None = None
+	venue: str
+	estimated: bool = True
+
+
+class ApplicationInterviewSchedule(BaseModel):
+	application_id: int
+	job_id: str
+	company: str
+	role_title: str
+	job_url: str
+	application_status: str
+	applied_at: datetime
+	events: list[InterviewEvent]
+
+
+class StudentInterviewSchedule(BaseModel):
+	applications: list[ApplicationInterviewSchedule]
+	generated_at: datetime
+	note: str
+
+
+def _as_utc(value: datetime) -> datetime:
+	return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+@router.get("/my-schedule", response_model=StudentInterviewSchedule)
+def get_my_interview_schedule(
+	session: Session = Depends(get_db),
+	current_user: User = Depends(require_roles("student")),
+) -> StudentInterviewSchedule:
+	"""Build an explicitly estimated interview timeline only for this student's applications."""
+	student = session.scalar(select(Student).where(Student.email == current_user.email))
+	if student is None:
+		raise HTTPException(status_code=404, detail="Student profile not found; onboarding required")
+	applications = list(session.scalars(
+		select(StudentApplication)
+		.where(StudentApplication.student_id == student.id)
+		.order_by(StudentApplication.created_at.desc(), StudentApplication.id.desc())
+	))
+	now = datetime.now(timezone.utc)
+	stages = (
+		("Online Coding Assessment", 2, "HackerRank practice", "https://www.hackerrank.com/dashboard", "Online Â· assessment link is issued by the employer"),
+		("Technical Round 1", 6, "Video interview", None, "Online Â· meeting link pending recruiter confirmation"),
+		("HR Discussion", 10, "Video interview", None, "Online Â· meeting link pending recruiter confirmation"),
+	)
+	result = []
+	for application in applications:
+		applied_at = _as_utc(application.created_at)
+		application_state = application.status.casefold()
+		shortlisted = application_state in {"shortlisted", "interview scheduled", "offer extended"}
+		completed = application_state == "completed"
+		events = []
+		for round_name, offset_days, platform, platform_url, venue in stages:
+			scheduled_at = applied_at + timedelta(days=offset_days)
+			status = "Completed" if completed else (
+				"Shortlisted" if shortlisted and round_name == "Technical Round 1" else (
+					"Upcoming" if scheduled_at >= now else "Awaiting recruiter update"
+				)
+			)
+			events.append(InterviewEvent(
+				id=f"{application.id}-{offset_days}",
+				application_id=application.id,
+				job_id=application.external_job_id,
+				company=application.company_name,
+				role_title=application.job_title,
+				application_status=application.status,
+				round_name=round_name,
+				scheduled_at=scheduled_at,
+				status=status,
+				platform=platform,
+				platform_url=platform_url,
+				venue=venue,
+			))
+		result.append(ApplicationInterviewSchedule(
+			application_id=application.id,
+			job_id=application.external_job_id,
+			company=application.company_name,
+			role_title=application.job_title,
+			job_url=application.job_url,
+			application_status=application.status,
+			applied_at=applied_at,
+			events=events,
+		))
+	return StudentInterviewSchedule(
+		applications=result,
+		generated_at=now,
+		note="Round dates are indicative estimates from the application date, not recruiter-confirmed appointments. Meeting links and exact assessment URLs appear only when provided by the employer.",
+	)
+
+==================== backend\app\api\v1\lifecycle.py ====================
+
+# Placeholder for lifecycle.py
+
+==================== backend\app\models\recruiter.py ====================
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.app.database import Base
+
+
+class RecruiterJD(Base):
+	__tablename__ = "recruiter_jds"
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+	company_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+	role_title: Mapped[str] = mapped_column(String(160), nullable=False)
+	min_cgpa: Mapped[float] = mapped_column(Float, nullable=False)
+	required_skills: Mapped[str] = mapped_column(Text, nullable=False)
+	package_lpa: Mapped[float] = mapped_column(Float, nullable=False)
+	application_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+	match_records: Mapped[list["MatchRecord"]] = relationship(back_populates="jd")
+
+==================== backend\app\models\application.py ====================
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from backend.app.database import Base
+
+
+class StudentApplication(Base):
+	__tablename__ = "student_applications"
+	__table_args__ = (
+		UniqueConstraint("student_id", "external_job_id", name="uq_student_application_job"),
+	)
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+	student_id: Mapped[int] = mapped_column(
+		ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True
+	)
+	external_job_id: Mapped[str] = mapped_column(String(100), nullable=False)
+	job_title: Mapped[str] = mapped_column(String(255), nullable=False)
+	company_name: Mapped[str] = mapped_column(String(255), nullable=False)
+	job_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+	status: Mapped[str] = mapped_column(String(32), nullable=False, default="Applied")
+	created_at: Mapped[datetime] = mapped_column(
+		DateTime(timezone=True), nullable=False, server_default=func.now()
+	)
+
+	student: Mapped["Student"] = relationship(back_populates="applications")
+
+==================== backend\app\models\drive.py ====================
+
+import enum
+from sqlalchemy import Column, Integer, String, Enum
+from backend.app.database import Base
+
+class DriveLiveStatus(str, enum.Enum):
+    scheduled = "scheduled"
+    in_progress = "in_progress"
+    bottlenecked = "bottlenecked"
+    completed = "completed"
+
+class Drive(Base):
+    __tablename__ = "drives"
+    id = Column(Integer, primary_key=True, index=True)
+    company_name = Column(String, nullable=True)
+    live_status = Column(Enum(DriveLiveStatus), default=DriveLiveStatus.scheduled)
+    panel_throughput_rate = Column(Integer, default=20)
+
+==================== backend\app\models\lifecycle.py ====================
+
+# Placeholder for lifecycle.py
+
+==================== backend\app\models\scheduling.py ====================
+
+from datetime import datetime
+
+from sqlalchemy import CheckConstraint, DateTime, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from backend.app.database import Base
+
+
+class PlacementDrive(Base):
+	__tablename__ = "placement_drives"
+	__table_args__ = (
+		CheckConstraint(
+			"status IN ('Scheduled', 'Completed', 'Conflicted')",
+			name="ck_placement_drives_status",
+		),
+	)
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+	company_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+	drive_date: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+	registration_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+	venue: Mapped[str] = mapped_column(String(160), nullable=False)
+	status: Mapped[str] = mapped_column(String(20), nullable=False, default="Scheduled")
+
+==================== frontend\src\routes\AppRouter.tsx ====================
+
+// Placeholder for AppRouter.tsx
+
+==================== backend\app\api\v1\router.py ====================
+
+from fastapi import APIRouter
+
+from backend.app.api.v1.analytics import router as analytics_router
+from backend.app.api.v1.application_analysis import router as application_analysis_router
+from backend.app.api.v1.ai_chat import router as ai_chat_router
+from backend.app.api.v1.attendance import router as attendance_router
+from backend.app.api.v1.auth import router as auth_router
+from backend.app.api.v1.drives import router as drives_router
+from backend.app.api.v1.growth import router as growth_router
+from backend.app.api.v1.interviews import router as interviews_router
+from backend.app.api.v1.matching import router as matching_router
+from backend.app.api.v1.messages import (
+	admin_messages_router,
+	recruiter_messages_router,
+	router as messages_router,
+)
+from backend.app.api.v1.mock_interview import router as mock_interview_router
+from backend.app.api.v1.notices import router as notices_router
+from backend.app.api.v1.jobs import router as jobs_router
+from backend.app.api.v1.recruiters import router as recruiters_router
+from backend.app.api.v1.students import router as students_router
+from backend.app.api.v1.coding_arenas import router as coding_router
+from backend.app.api.v1.courses import router as courses_router
+from backend.app.api.v1.community import router as community_router
+from backend.app.api.v1.tests import router as tests_router
+
+api_router = APIRouter(prefix="/api")
+api_router.include_router(auth_router)
+api_router.include_router(attendance_router, prefix="/attendance", tags=["attendance"])
+api_router.include_router(students_router)
+api_router.include_router(drives_router)
+api_router.include_router(growth_router)
+api_router.include_router(growth_router, prefix="/v1")
+api_router.include_router(ai_chat_router, prefix="/v1")
+api_router.include_router(interviews_router, prefix="/v1")
+api_router.include_router(mock_interview_router, prefix="/v1")
+api_router.include_router(matching_router)
+api_router.include_router(notices_router, prefix="/v1")
+api_router.include_router(jobs_router, prefix="/v1")
+api_router.include_router(application_analysis_router, prefix="/v1")
+api_router.include_router(recruiters_router)
+api_router.include_router(analytics_router)
+api_router.include_router(coding_router, prefix="/v1")
+api_router.include_router(courses_router, prefix="/v1")
+api_router.include_router(tests_router, prefix="/v1")
+api_router.include_router(community_router, prefix="/v1")
+api_router.include_router(messages_router, prefix="/v1")
+api_router.include_router(recruiter_messages_router, prefix="/v1")
+api_router.include_router(admin_messages_router, prefix="/v1")
